@@ -1,5 +1,10 @@
 Revision history for AnyEvent-Curl-Multi:
 
+0.02    Fri Oct 29 00:07:03 PDT 2010
+        - No longer uses filehandles for receiving data 
+          (and requires WWW::Curl 4.14)
+        - Added recommendations to have libcurl built with c-ares
+
 0.01    Sun Oct 24 17:00:32 PDT 2010
         Initial release.
 

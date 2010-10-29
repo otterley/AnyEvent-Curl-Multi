@@ -4,12 +4,13 @@ use common::sense;
 use base 'Object::Event';
 use Carp qw(croak);
 use AnyEvent;
+use WWW::Curl 4.14;
 use WWW::Curl::Easy;
 use WWW::Curl::Multi;
 use Scalar::Util qw(refaddr);
 use HTTP::Response;
 
-our $VERSION = 0.01;
+our $VERSION = 0.02;
 
 =head1 NAME
 
@@ -44,7 +45,7 @@ This module is an AnyEvent user; you must use and run a supported event loop.
 
 AnyEvent::Curl::Multi is an asynchronous, event-driven HTTP client.  You can
 use it to make multiple HTTP requests in parallel using a single process.  It
-uses libcurl for fast performance. 
+uses libcurl for fast performance.
 
 The basic usage pattern is to (1) create a client object, (2) declare some
 callbacks that will be executed when a response is received or an error occurs,
@@ -87,21 +88,20 @@ Specifies the maximum number of HTTP redirects that will be followed.  Set to
 
 =head2 Callbacks
 
-If you care about the results of your requests (which should be the case)
-you'll need to declare callbacks to handle them.  AnyEvent::Curl::Multi is a
-subclass of Object::Event, and it will fire the following events:
+You may (err, should) register interest in the following events using the
+client's reg_cb() method (see Object::Event for more details on reg_cb()):
 
 =over
 
 =item response => $cb->($client, $request, $response, $stats);
 
 Fired when a response is received.  (This doesn't imply that the response is
-HTTP OK, so you'll still have to examine the response to see whether there was
+HTTP OK, so you should examine the response to determine whether there was
 an HTTP error of some sort.)  
 
 The arguments sent to your callback will be the client object, the original
 request (untampered with), the response (as an HTTP::Response object), and a
-hashref containing some interesting stats.
+hashref containing some interesting statistics.
 
 =item error => $cb->($client, $request, $errmsg, $stats);
 
@@ -109,7 +109,7 @@ Fired when an error is received.
 
 The arguments sent to your callback will be the client object, the original
 request (untampered with), the error message, and a hashref containing some
-interesting stats.  (If the error was other than a timeout, the stats values
+interesting statistics.  (If the error was other than a timeout, the statistics
 may be invalid.)
 
 =back
@@ -182,10 +182,8 @@ sub request {
     # Initialize easy curl handle
     my $id = refaddr $easy_h;
     my ($response, $header);
-    open (my $resp_h, ">", \$response);
-    open (my $hdr_h, ">", \$header);
-    $easy_h->setopt(CURLOPT_WRITEDATA, $resp_h);
-    $easy_h->setopt(CURLOPT_WRITEHEADER, $hdr_h);
+    $easy_h->setopt(CURLOPT_WRITEDATA, \$response);
+    $easy_h->setopt(CURLOPT_WRITEHEADER, \$header);
     $easy_h->setopt(CURLOPT_PRIVATE, $id);
 
     my $obj = {
@@ -378,8 +376,14 @@ sub max_concurrency {
 
 =head1 NOTES
 
-libcurl 7.21 or higher is recommended.  There are some bugs in prior versions
-pertaining to host resolution and accurate timeouts.
+B<libcurl 7.21 or higher is recommended.>  There are some bugs in prior
+versions pertaining to host resolution and accurate timeouts.
+
+B<libcurl should be compiled with c-ares support.>  Otherwise, the DNS
+resolution phase that occurs at the beginning of each request will block your
+program, which could significantly compromise its concurrency.  (You can verify
+whether your libcurl has been built with c-ares support by running C<curl -V>
+and looking for "AsynchDNS" in the features list.)
 
 libcurl's internal hostname resolution cache is disabled by this module (among
 other problems, it does not honor DNS TTL values).  If you need fast hostname
