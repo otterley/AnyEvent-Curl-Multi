@@ -10,7 +10,10 @@ use WWW::Curl::Multi;
 use Scalar::Util qw(refaddr);
 use HTTP::Response;
 
-our $VERSION = 0.02;
+our $VERSION = 0.03;
+
+# Test whether subsecond timeouts are supported.
+eval { CURLOPT_TIMEOUT_MS(); }; my $MS_TIMEOUT_SUPPORTED = $@ ? 0 : 1;
 
 =head1 NAME
 
@@ -72,7 +75,9 @@ You can also set global default behaviors for requests:
 
 =item timeout => PERIOD
 
-Sets a maximum timeout for the request, in fractional seconds (ms resolution).
+Specified a timeout for each request.  If your WWW::Curl is linked against
+libcurl 7.16.2 or later, this value can be specified in fractional seconds (ms
+resolution).  Otherwise, the value must be specified in whole seconds.
 
 =item proxy => HOST[:PORT]
 
@@ -131,7 +136,9 @@ The following attributes are accepted:
 
 =item timeout => PERIOD
 
-Sets a maximum timeout for the request, in fractional seconds (ms resolution).
+Specified a timeout for the request.  If your WWW::Curl is linked against
+libcurl 7.16.2 or later, this value can be specified in fractional seconds (ms
+resolution).  Otherwise, the value must be specified in whole seconds.
 
 =item proxy => HOST[:PORT]
 
@@ -162,6 +169,13 @@ sub new {
         debug => undef,
         @_
     );
+
+    if (! $MS_TIMEOUT_SUPPORTED 
+        && $self->{timeout}
+        && $self->{timeout} != int($self->{timeout})) {
+        croak "Subsecond timeout resolution is not supported by your " .
+              "libcurl version.  Upgrade to 7.16.2 or later.";
+    }
 
     return bless $self, $class;
 }
@@ -330,7 +344,17 @@ sub _gen_easy_h {
     $easy_h->setopt(CURLOPT_PROXY, $proxy) if $proxy;
 
     my $timeout = $self->{timeout} || $opts{timeout};
-    $easy_h->setopt(CURLOPT_TIMEOUT_MS, $timeout * 1000) if $timeout;
+
+    if ($timeout) {
+        if ($timeout == int($timeout)) {
+            $easy_h->setopt(CURLOPT_TIMEOUT, $timeout);
+        } else {
+            croak "Subsecond timeout resolution is not supported by your " .
+                  "libcurl version.  Upgrade to 7.16.2 or later."
+                unless $MS_TIMEOUT_SUPPORTED;
+            $easy_h->setopt(CURLOPT_TIMEOUT_MS(), $timeout * 1000);
+        }
+    }
 
     my $max_redirects = $self->{max_redirects} || $opts{max_redirects};
     if ($max_redirects > 0) {
@@ -377,7 +401,8 @@ sub max_concurrency {
 =head1 NOTES
 
 B<libcurl 7.21 or higher is recommended.>  There are some bugs in prior
-versions pertaining to host resolution and accurate timeouts.
+versions pertaining to host resolution and accurate timeouts.  In addition,
+subsecond timeouts were not available prior to version 7.16.2.
 
 B<libcurl should be compiled with c-ares support.>  Otherwise, the DNS
 resolution phase that occurs at the beginning of each request will block your
