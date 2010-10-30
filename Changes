@@ -1,5 +1,11 @@
 Revision history for AnyEvent-Curl-Multi:
 
+0.03    Sat Oct 30 13:32:45 PDT 2010
+	- Makefile.PL now emits a warning if the local libcurl doesn't support
+	  subsecond timeouts.
+        - new() and request() methods croak if subsecond timeouts are specified
+          but libcurl doesn't support them.
+
 0.02    Fri Oct 29 00:07:03 PDT 2010
         - No longer uses filehandles for receiving data 
           (and requires WWW::Curl 4.14)
