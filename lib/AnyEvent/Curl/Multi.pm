@@ -10,7 +10,7 @@ use WWW::Curl::Multi;
 use Scalar::Util qw(refaddr);
 use HTTP::Response;
 
-our $VERSION = 0.03;
+our $VERSION = 0.04;
 
 # Test whether subsecond timeouts are supported.
 eval { CURLOPT_TIMEOUT_MS(); }; my $MS_TIMEOUT_SUPPORTED = $@ ? 0 : 1;
