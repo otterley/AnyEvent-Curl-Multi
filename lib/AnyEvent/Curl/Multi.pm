@@ -160,7 +160,8 @@ sub new {
         multi_h => WWW::Curl::Multi->new,
         state => {},
         timer_w => undef,
-        io_w => {},
+        rio_w => {},
+        wio_w => {},
         queue => [],
         max_concurrency => 0,
         max_redirects => 0,
@@ -237,7 +238,6 @@ sub _perform {
 
     my $active_handles = scalar keys %{$self->{state}};
     my $handles_left = $self->{multi_h}->perform;
-    my ($readfds, $writefds, $errfds) = $self->{multi_h}->fdset;
 
     if ($handles_left != $active_handles) {
         while (my ($id, $rv) = $self->{multi_h}->info_read) {
@@ -286,33 +286,32 @@ sub _perform {
     if (! $active_handles) {
         # Nothing left to do - no point keeping the watchers around anymore.
         delete $self->{timer_w};
-        delete $self->{io_w};
+        delete $self->{rio_w};
+        delete $self->{wio_w};
         return;
     }
+
+    my ($readfds, $writefds, $errfds) = $self->{multi_h}->fdset;
 
     # Cancel any I/O watchers associated with file descriptors that
     # are no longer used.
     my %fds;
-    $fds{$_} = 1 for (@$readfds, @$writefds, @$errfds);
-    for (keys %{$self->{io_w}}) {
-        delete $self->{io_w}->{$_} if ! $fds{$_};
+    $fds{$_} = 0 for @$readfds;
+    $fds{$_} = 1 for @$writefds;
+    foreach my $fd (keys %{$self->{rio_w}}) {
+        delete $self->{rio_w}->{$fd} 
+            unless exists $fds{$fd} && $fds{$fd} == 0;
     }
-    
-    # Check the multi handle whenever a connection fd is ready.
-
-    # NOTE: There may be a bug here if a fd associated with read events
-    # becomes associated with write events (or vice versa) without being
-    # removed from the fdset first.  If this ever exhibits itself in the real
-    # world, change the conditional assignments (||=) to unconditional ones
-    # (=).  In the meantime, conditional assigment saves us the overhead of
-    # pointlessly destroying and reinitializing an I/O watcher, so we use it to
-    # improve performance.
-
-    for (@$readfds) {
-        $self->{io_w}->{$_} ||= AE::io($_, 0, sub { $self->_perform }); 
+    foreach my $fd (keys %{$self->{wio_w}}) {
+        delete $self->{wio_w}->{$fd}
+            unless exists $fds{$fd} && $fds{$fd} == 1;
     }
-    for (@$writefds) {
-        $self->{io_w}->{$_} ||= AE::io($_, 1, sub { $self->_perform }); 
+
+    foreach my $fd (@$writefds) {
+        $self->{wio_w}->{$fd} ||= AE::io($fd, 1, sub { $self->_perform }); 
+    }
+    foreach my $fd (@$readfds) {
+        $self->{rio_w}->{$fd} ||= AE::io($fd, 0, sub { $self->_perform }); 
     }
 }
 

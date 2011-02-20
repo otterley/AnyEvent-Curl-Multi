@@ -1,5 +1,9 @@
 Revision history for AnyEvent-Curl-Multi:
 
+0.04    Sat Feb 19 16:03:05 PST 2011
+	- Fixed bug that was causing us to check response readiness
+          much too frequently.
+
 0.03    Sat Oct 30 13:32:45 PDT 2010
 	- Makefile.PL now emits a warning if the local libcurl doesn't support
 	  subsecond timeouts.
