@@ -10,7 +10,7 @@ use WWW::Curl::Multi;
 use Scalar::Util qw(refaddr);
 use HTTP::Response;
 
-our $VERSION = 0.04;
+our $VERSION = '1.0';
 
 # Test whether subsecond timeouts are supported.
 eval { CURLOPT_TIMEOUT_MS(); }; my $MS_TIMEOUT_SUPPORTED = $@ ? 0 : 1;
@@ -26,21 +26,34 @@ AnyEvent::Curl::Multi - a fast event-driven HTTP client
   
   my $client = AnyEvent::Curl::Multi->new;
   $client->max_concurrency(10);
-  
+
+  # Method 1: Object::Event pattern
+  #
   # Schedule callbacks to be fired when a response is received,
   # or when an error occurs.
   $client->reg_cb(response => sub {
       my ($client, $request, $response, $stats) = @_;
       # $response is an HTTP::Request object
   });
-  
   $client->reg_cb(error => sub {
       my ($client, $request, $errmsg, $stats) = @_;
       # ...
   });
-  
   my $request = HTTP::Request->new(...);
   $client->request($request);
+
+  # Method 2: AnyEvent::CondVar pattern
+  # Do not use this pattern in an existing event loop!
+  my $handle = $client->request($request);
+  eval {
+      my ($response, $stats) = $handle->cv->recv;
+      # $response is an HTTP::Request object
+      # ...
+  }; 
+  if ($@) {
+      my $errmsg = $@;
+      # ...
+  }
   
 =head1 DESCRIPTION
 
@@ -49,10 +62,6 @@ This module is an AnyEvent user; you must use and run a supported event loop.
 AnyEvent::Curl::Multi is an asynchronous, event-driven HTTP client.  You can
 use it to make multiple HTTP requests in parallel using a single process.  It
 uses libcurl for fast performance.
-
-The basic usage pattern is to (1) create a client object, (2) declare some
-callbacks that will be executed when a response is received or an error occurs,
-and (3) issue HTTP::Request objects to the client.  
 
 =head2 Initializing the client
 
@@ -75,7 +84,7 @@ You can also set global default behaviors for requests:
 
 =item timeout => PERIOD
 
-Specified a timeout for each request.  If your WWW::Curl is linked against
+Specifies a timeout for each request.  If your WWW::Curl is linked against
 libcurl 7.16.2 or later, this value can be specified in fractional seconds (ms
 resolution).  Otherwise, the value must be specified in whole seconds.
 
@@ -91,10 +100,48 @@ Specifies the maximum number of HTTP redirects that will be followed.  Set to
 
 =back
 
+=head2 Issuing requests
+
+To dispatch HTTP requests to the client, use the request() method.  request()
+takes an HTTP::Request object as the first argument, and a list of
+attribute-value pairs as the remaining arguments:
+  
+  $handle = $client->request($request, ...);
+
+The following attributes are accepted:
+
+=over 
+
+=item timeout => PERIOD
+
+Specified a timeout for the request.  If your WWW::Curl is linked against
+libcurl 7.16.2 or later, this value can be specified in fractional seconds (ms
+resolution).  Otherwise, the value must be specified in whole seconds.
+
+=item proxy => HOST[:PORT]
+
+Specifies a proxy host/port, separated by a colon.  (The port number is optional.)
+
+=item max_redirects => COUNT
+
+Specifies the maximum number of HTTP redirects that will be followed.  Set to
+0 to disable following redirects.
+
+=back
+ 
+The request() method returns an object of class AnyEvent::Curl::Multi::Handle.
+This object can be used later to cancel the request; see "Canceling requests",
+below.  
+
+Calling $handle->cv() will return an AnyEvent condvar that you can use as usual
+(e.g., recv() or cb()) to retrieve response results, or that will croak if an
+error occurs.  See L<AnyEvent> for details on condvars.
+
 =head2 Callbacks
 
-You may (err, should) register interest in the following events using the
-client's reg_cb() method (see Object::Event for more details on reg_cb()):
+Instead of using condvars, you may register interest in the following events
+using the client's reg_cb() method (see Object::Event for more details on
+reg_cb()):
 
 =over
 
@@ -118,39 +165,7 @@ interesting statistics.  (If the error was other than a timeout, the statistics
 may be invalid.)
 
 =back
-
-=head2 Issuing requests
-
-Once you've established your callbacks, you can issue your requests via the
-request() method.  request() takes an HTTP::Request object as the first
-argument, and a list of attribute-value pairs as the remaining arguments:
   
-  $client->request($request, ...);
- 
-The request() method returns an object that can later be used to cancel the
-request.  See "Canceling requests", below.
-  
-The following attributes are accepted:
-
-=over 
-
-=item timeout => PERIOD
-
-Specified a timeout for the request.  If your WWW::Curl is linked against
-libcurl 7.16.2 or later, this value can be specified in fractional seconds (ms
-resolution).  Otherwise, the value must be specified in whole seconds.
-
-=item proxy => HOST[:PORT]
-
-Specifies a proxy host/port, separated by a colon.  (The port number is optional.)
-
-=item max_redirects => COUNT
-
-Specifies the maximum number of HTTP redirects that will be followed.  Set to
-0 to disable following redirects.
-
-=back
-
 =cut
 
 sub new { 
@@ -206,13 +221,14 @@ sub request {
         req => $req,
         response => \$response,
         header => \$header,
+        cv => AE::cv,
     };
 
     push @{$self->{queue}}, $obj;
 
     $self->_dequeue;
 
-    return $obj;
+    return bless $obj, 'AnyEvent::Curl::Multi::Handle';
 }
 
 sub _dequeue {
@@ -257,6 +273,7 @@ sub _perform {
                 };
                 if ($rv) {
                     # Error
+                    $state->{cv}->croak($easy_h->errbuf);
                     $req->event('error', $easy_h->errbuf, $stats) 
                         if $req->can('event');
                     $self->event('error', $req, $easy_h->errbuf, $stats);
@@ -270,6 +287,7 @@ sub _perform {
                                                          "\n\n" . 
                                                          ${$state->{response}});
                     $response->request($req);
+                    $state->{cv}->send($response, $stats);
                     $req->event('response', $response, $stats) 
                         if $req->can('event');
                     $self->event('response', $req, $response, $stats);
@@ -395,6 +413,10 @@ sub max_concurrency {
     return $self->{max_concurrency};
 }
 
+package AnyEvent::Curl::Multi::Handle;
+
+sub cv { shift->{cv} }
+
 1;
 
 =head1 NOTES
@@ -419,7 +441,8 @@ please contact the author.
 
 =head1 SEE ALSO
 
-AnyEvent, AnyEvent::Handle, Object::Event, HTTP::Request, HTTP::Response
+L<AnyEvent>, L<AnyEvent::Handle>, L<Object::Event>, L<HTTP::Request>,
+L<HTTP::Response>
 
 =head1 AUTHORS AND CONTRIBUTORS
 
@@ -428,7 +451,8 @@ and is the current maintainer.
 
 =head1 COPYRIGHT AND LICENSE
 
-(C) 2010 Yahoo! Inc.
+(C) 2010-2011 Michael S. Fischer.
+(C) 2010-2011 Yahoo! Inc.
 
 This program is free software; you can redistribute it and/or modify it
 under the terms of either: the GNU General Public License as published
