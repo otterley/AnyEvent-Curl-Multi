@@ -10,7 +10,7 @@ use WWW::Curl::Multi;
 use Scalar::Util qw(refaddr);
 use HTTP::Response;
 
-our $VERSION = '1.0';
+our $VERSION = '1.1';
 
 # Test whether subsecond timeouts are supported.
 eval { CURLOPT_TIMEOUT_MS(); }; my $MS_TIMEOUT_SUPPORTED = $@ ? 0 : 1;
@@ -98,6 +98,13 @@ optional.)
 Specifies the maximum number of HTTP redirects that will be followed.  Set to
 0 to disable following redirects.
 
+=item ipresolve => 4 | 6
+
+Specifies which kind of IP address to select when resolving host names.  This
+is only useful when using host names that resolve to both IPv4 and IPv6
+addresses.  The allowed values are 4 (IPv4) or 6 (IPv6).  The default is to
+resolve to all addresses.
+
 =back
 
 =head2 Issuing requests
@@ -175,14 +182,14 @@ sub new {
         multi_h => WWW::Curl::Multi->new,
         state => {},
         timer_w => undef,
-        rio_w => {},
-        wio_w => {},
+        io_w => {},
         queue => [],
         max_concurrency => 0,
         max_redirects => 0,
         timeout => undef,
         proxy => undef,
         debug => undef,
+        ipresolve => undef,
         @_
     );
 
@@ -252,84 +259,72 @@ sub _dequeue {
 sub _perform {
     my $self = shift;
 
-    my $active_handles = scalar keys %{$self->{state}};
-    my $handles_left = $self->{multi_h}->perform;
+    $self->{multi_h}->perform;
 
-    if ($handles_left != $active_handles) {
-        while (my ($id, $rv) = $self->{multi_h}->info_read) {
-            if ($id) {
-                my $state = $self->{state}->{$id};
-                my $req = $state->{req};
-                my $easy_h = $state->{easy_h};
-                my $stats = {
-                    total_time => $easy_h->getinfo(CURLINFO_TOTAL_TIME),
-                    dns_time => $easy_h->getinfo(CURLINFO_NAMELOOKUP_TIME),
-                    connect_time => $easy_h->getinfo(CURLINFO_CONNECT_TIME),
-                    start_transfer_time => 
-                        $easy_h->getinfo(CURLINFO_STARTTRANSFER_TIME),
-                    download_bytes => 
-                        $easy_h->getinfo(CURLINFO_SIZE_DOWNLOAD),
-                    upload_bytes => $easy_h->getinfo(CURLINFO_SIZE_UPLOAD),
-                };
-                if ($rv) {
-                    # Error
-                    $state->{cv}->croak($easy_h->errbuf);
-                    $req->event('error', $easy_h->errbuf, $stats) 
-                        if $req->can('event');
-                    $self->event('error', $req, $easy_h->errbuf, $stats);
-                } else {
-                    # libcurl appends subsequent response headers to the buffer
-                    # when following redirects.  We need to remove all but the
-                    # most recent header before we parse the response.
-                    my $last_header = (split(/\r?\n\r?\n/, 
-                                       ${$state->{header}}))[-1];
-                    my $response = HTTP::Response->parse($last_header . 
-                                                         "\n\n" . 
-                                                         ${$state->{response}});
-                    $response->request($req);
-                    $state->{cv}->send($response, $stats);
-                    $req->event('response', $response, $stats) 
-                        if $req->can('event');
-                    $self->event('response', $req, $response, $stats);
-                }
-                delete $self->{state}->{$id};
-                $self->_dequeue;
+    while (my ($id, $rv) = $self->{multi_h}->info_read) {
+        if ($id) {
+            my $state = $self->{state}->{$id};
+            my $req = $state->{req};
+            my $easy_h = $state->{easy_h};
+            my $stats = {
+                total_time => $easy_h->getinfo(CURLINFO_TOTAL_TIME),
+                dns_time => $easy_h->getinfo(CURLINFO_NAMELOOKUP_TIME),
+                connect_time => $easy_h->getinfo(CURLINFO_CONNECT_TIME),
+                start_transfer_time => 
+                    $easy_h->getinfo(CURLINFO_STARTTRANSFER_TIME),
+                download_bytes => 
+                    $easy_h->getinfo(CURLINFO_SIZE_DOWNLOAD),
+                upload_bytes => $easy_h->getinfo(CURLINFO_SIZE_UPLOAD),
+            };
+            if ($rv) {
+                # Error
+                $state->{cv}->croak($easy_h->errbuf);
+                $req->event('error', $easy_h->errbuf, $stats) 
+                    if $req->can('event');
+                $self->event('error', $req, $easy_h->errbuf, $stats);
+            } else {
+                # libcurl appends subsequent response headers to the buffer
+                # when following redirects.  We need to remove all but the
+                # most recent header before we parse the response.
+                my $last_header = (split(/\r?\n\r?\n/, 
+                                   ${$state->{header}}))[-1];
+                my $response = HTTP::Response->parse($last_header . 
+                                                     "\n\n" . 
+                                                     ${$state->{response}});
+                $req->uri($easy_h->getinfo(CURLINFO_EFFECTIVE_URL));
+                $response->request($req);
+                $state->{cv}->send($response, $stats);
+                $req->event('response', $response, $stats) 
+                    if $req->can('event');
+                $self->event('response', $req, $response, $stats);
             }
+            delete $self->{state}->{$id};
+            $self->_dequeue;
         }
     }
 
     # We must recalculate the number of active handles here, because
     # a user-provided callback may have added a new one.
-    $active_handles = scalar keys %{$self->{state}};
+    my $active_handles = scalar keys %{$self->{state}};
     if (! $active_handles) {
         # Nothing left to do - no point keeping the watchers around anymore.
         delete $self->{timer_w};
-        delete $self->{rio_w};
-        delete $self->{wio_w};
+        delete $self->{io_w};
         return;
+    }
+
+    # Re-establish all I/O watchers
+    foreach my $fd (keys %{$self->{io_w}}) {
+        delete $self->{io_w}->{$fd};
     }
 
     my ($readfds, $writefds, $errfds) = $self->{multi_h}->fdset;
 
-    # Cancel any I/O watchers associated with file descriptors that
-    # are no longer used.
-    my %fds;
-    $fds{$_} = 0 for @$readfds;
-    $fds{$_} = 1 for @$writefds;
-    foreach my $fd (keys %{$self->{rio_w}}) {
-        delete $self->{rio_w}->{$fd} 
-            unless exists $fds{$fd} && $fds{$fd} == 0;
-    }
-    foreach my $fd (keys %{$self->{wio_w}}) {
-        delete $self->{wio_w}->{$fd}
-            unless exists $fds{$fd} && $fds{$fd} == 1;
-    }
-
     foreach my $fd (@$writefds) {
-        $self->{wio_w}->{$fd} ||= AE::io($fd, 1, sub { $self->_perform }); 
+        $self->{io_w}->{$fd} ||= AE::io($fd, 1, sub { $self->_perform }); 
     }
     foreach my $fd (@$readfds) {
-        $self->{rio_w}->{$fd} ||= AE::io($fd, 0, sub { $self->_perform }); 
+        $self->{io_w}->{$fd} ||= AE::io($fd, 0, sub { $self->_perform }); 
     }
 }
 
@@ -343,6 +338,16 @@ sub _gen_easy_h {
 
     $easy_h->setopt(CURLOPT_SSL_VERIFYPEER, 0);
     $easy_h->setopt(CURLOPT_DNS_CACHE_TIMEOUT, 0);
+
+    if (defined $self->{ipresolve}) {
+        if (int($self->{ipresolve}) == 4) {
+            $easy_h->setopt(CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+        } elsif (int($self->{ipresolve}) == 6) {
+            $easy_h->setopt(CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V6);
+        } else {
+            die "Invalid ipresolve setting '$self->{ipresolve}' (must be 4 or 6)";
+        }
+    }
 
     $easy_h->setopt(CURLOPT_CUSTOMREQUEST, $req->method);
     $easy_h->setopt(CURLOPT_HTTPHEADER, 
@@ -373,7 +378,9 @@ sub _gen_easy_h {
         }
     }
 
-    my $max_redirects = $self->{max_redirects} || $opts{max_redirects};
+    my $max_redirects = defined $opts{max_redirects} ? $opts{max_redirects}
+                                                     : $self->{max_redirects};
+
     if ($max_redirects > 0) {
         $easy_h->setopt(CURLOPT_FOLLOWLOCATION, 1);
         $easy_h->setopt(CURLOPT_MAXREDIRS, $max_redirects);

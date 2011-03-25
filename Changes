@@ -1,5 +1,12 @@
 Revision history for AnyEvent-Curl-Multi:
 
+1.1     Fri Mar 25 14:58:08 PDT 2011
+	- Added ipresolve attribute to new() method (so you can connect only to
+	  IPv4 or v6 addresses as you so choose).
+	- Simplified curl perform loop.
+	- Fixed bug where specific requests with no-redirects weren't handled
+	  correctly if client was configured to follow redirects.
+
 1.0     Thu Mar 17 23:22:05 PDT 2011
         - condvars are now associated with requests.
 
